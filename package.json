@@ -1,14 +1,14 @@
 {
-  "name": "wa-replicador",
+  "name": "wa-replicator",
   "version": "1.0.0",
-  "description": "Bot para replicar mensajes de WhatsApp en varios grupos",
+  "type": "commonjs",             // 👈 Muy importante: usa CommonJS, no módulos ESM.
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "dotenv": "^16.0.3",
-    "whatsapp-web.js": "^1.23.0",
-    "qrcode-terminal": "^0.12.0"
+    "dotenv": "^16.4.0",
+    "qrcode-terminal": "^0.10.0",
+    "whatsapp-web.js": "1.23.1"   // 👈 Usa una versión estable (1.23.x o 1.24.x).
   }
 }
