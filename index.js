@@ -1,135 +1,105 @@
-require('dotenv').config();
-const { Client, MessageMedia } = require('whatsapp-web.js');
+const { Client, LocalAuth } = require('whatsapp-web.js');
 const qrcode = require('qrcode-terminal');
+require('dotenv').config();
 
+// Cargar variables de entorno
 const {
-  WHATSAPP_GROUP_SOURCE = '',
-  WHATSAPP_GROUP_TARGETS = '',
-  TRIGGER = '#publicar',
-  SEND_DELAY_MS = '1500',
-  MAX_GROUPS_PER_BATCH = '5',
-  BATCH_PAUSE_MS = '12000',
-  RETRY_ATTEMPTS = '2',
-  RETRY_BACKOFF_MS = '2500',
-  JITTER_MS = '500',
-  LIST_GROUPS = '0'
+  WHATSAPP_GROUP_SOURCE,
+  WHATSAPP_GROUP_TARGETS,
+  TRIGGER,
+  SEND_DELAY_MS,
+  MAX_GROUPS_PER_BATCH,
+  BATCH_PAUSE_MS,
+  RETRY_ATTEMPTS,
+  RETRY_BACKOFF_MS,
+  JITTER_MS,
+  LIST_GROUPS
 } = process.env;
 
-const SEND_DELAY = Math.max(0, Number(SEND_DELAY_MS) || 1500);
-const BATCH_SIZE = Math.max(1, Number(MAX_GROUPS_PER_BATCH) || 5);
-const BATCH_PAUSE = Math.max(0, Number(BATCH_PAUSE_MS) || 12000);
-const RETRIES = Math.max(0, Number(RETRY_ATTEMPTS) || 2);
-const RETRY_BACKOFF = Math.max(0, Number(RETRY_BACKOFF_MS) || 2500);
-const JITTER = Math.max(0, Number(JITTER_MS) || 500);
-
-const GROUP_SOURCE = WHATSAPP_GROUP_SOURCE.trim();
-const GROUP_TARGETS = WHATSAPP_GROUP_TARGETS.split(',').map(g => g.trim()).filter(Boolean);
-
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-const chunkArray = (arr, size) => {
-  const result = [];
-  for (let i = 0; i < arr.length; i += size) {
-    result.push(arr.slice(i, i + size));
-  }
-  return result;
-};
-
-if (!GROUP_SOURCE) {
-  console.error('❌ Falta WHATSAPP_GROUP_SOURCE en .env');
-  process.exit(1);
-}
-if (!GROUP_TARGETS.length) {
-  console.error('❌ Falta WHATSAPP_GROUP_TARGETS en .env');
-  process.exit(1);
-}
-
-const client = new Client({
-  puppeteer: {
-    headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox']
-  }
-});
-
+// Flag para evitar eventos "ready" duplicados
 let isReady = false;
 
-client.on('qr', qr => {
-  console.log('🔐 Escaneá este QR:');
-  qrcode.generate(qr, { small: true });
+// Crear cliente con LocalAuth
+const client = new Client({
+  authStrategy: new LocalAuth({
+    dataPath: './session',         // Carpeta donde se guardan las sesiones
+    restartOnAuthFail: false,
+    takeoverOnConflict: false
+  }),
+  puppeteer: {
+    headless: true,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--no-first-run',
+      '--no-zygote'
+    ]
+  }
 });
 
-client.on('ready', () => {
+// Mostrar QR para iniciar sesión
+client.on('qr', qr => {
+  qrcode.generate(qr, { small: true });
+  console.log('Escanea el QR con la app de WhatsApp para vincular la sesión');
+});
+
+// Evento listo
+client.on('ready', async () => {
   if (isReady) return;
   isReady = true;
+  console.log('Cliente listo. Conectado a WhatsApp.');
 
-  console.log('✅ Bot listo');
-  console.log('🟡 Grupo principal:', GROUP_SOURCE);
-  console.log('🔵 Grupos destino:', GROUP_TARGETS.length, 'grupos');
-  console.log('👂 Escuchando mensajes...');
+  // Listar grupos si LIST_GROUPS está activado
   if (LIST_GROUPS === '1') {
-    client.getChats().then(chats => {
-      const grupos = chats.filter(c => c.isGroup).map(g => g.name);
-      console.log('Grupos disponibles:', grupos);
-    });
+    const chats = await client.getChats();
+    chats.filter(c => c.isGroup).forEach(c => console.log(`• ${c.name}`));
+    console.log('Copia estos nombres en WHATSAPP_GROUP_SOURCE y WHATSAPP_GROUP_TARGETS');
   }
 });
 
-client.on('message', async (msg) => {
-  try {
-    const chat = await msg.getChat();
-    if (chat.isGroup && chat.name === GROUP_SOURCE) {
-      const texto = (msg.caption || msg.body || '').trim();
-      if (texto.includes(TRIGGER) && msg.hasMedia) {
-        console.log('🔔 Mensaje detectado');
+// Escuchar mensajes
+client.on('message', async msg => {
+  if (!msg.hasMedia || msg.fromMe) return;
+  if (!msg.body || !msg.body.toLowerCase().includes(TRIGGER.toLowerCase())) return;
+  console.log('Trigger detectado en grupo origen');
 
-        const media = await msg.downloadMedia();
-        if (!media) {
-          console.log('❌ Error descargando media');
-          return;
-        }
+  // Descargar media
+  const media = await msg.downloadMedia();
+  if (!media) {
+    console.log('El mensaje no tiene media adjunta. Se ignora.');
+    return;
+  }
 
-        const caption = texto.replace(TRIGGER, '').trim();
-        const allChats = await client.getChats();
-        const destinos = GROUP_TARGETS
-          .map(nombre => allChats.find(c => c.isGroup && c.name === nombre))
-          .filter(Boolean);
-
-        if (!destinos.length) {
-          console.log('❌ No se encontraron grupos destino');
-          return;
-        }
-
-        const batches = chunkArray(destinos, BATCH_SIZE);
-
-        for (let i = 0; i < batches.length; i++) {
-          const batch = batches[i];
-          for (const destino of batch) {
-            let ok = false, intentos = 0;
-            while (!ok && intentos <= RETRIES) {
-              try {
-                await destino.sendMessage(
-                  new MessageMedia(media.mimetype, media.data, media.filename),
-                  { caption }
-                );
-                console.log(`  ✓ ${destino.name}`);
-                ok = true;
-              } catch (err) {
-                console.error(`  ✗ ${destino.name}:`, err.message);
-                intentos++;
-                await sleep(RETRY_BACKOFF + Math.floor(Math.random() * JITTER));
-              }
-            }
-            await sleep(SEND_DELAY + Math.floor(Math.random() * JITTER));
-          }
-          if (i < batches.length - 1) {
-            await sleep(BATCH_PAUSE);
-          }
-        }
+  // Enviar a cada grupo destino en lotes
+  const groups = WHATSAPP_GROUP_TARGETS.split(',').map(g => g.trim());
+  let index = 0;
+  for (const groupName of groups) {
+    try {
+      const chats = await client.getChats();
+      const chat = chats.find(c => c.isGroup && c.name === groupName);
+      if (chat) {
+        await chat.sendMessage(media, { caption: msg.body });
+        console.log(`Enviado a ${groupName}`);
+      } else {
+        console.log(`Grupo no encontrado: ${groupName}`);
       }
+    } catch (err) {
+      console.error(`Error al enviar a ${groupName}:`, err);
     }
-  } catch (err) {
-    console.error('❌ Error global:', err.message);
+    index++;
+    if (index % MAX_GROUPS_PER_BATCH === 0) {
+      await new Promise(res => setTimeout(res, Number(BATCH_PAUSE_MS)));
+    } else {
+      await new Promise(res => setTimeout(res, Number(SEND_DELAY_MS)));
+    }
   }
 });
+
+// Inicializar cliente
+client.initialize();
+
 
 console.log('🔄 Iniciando...');
 client.initialize();
+
