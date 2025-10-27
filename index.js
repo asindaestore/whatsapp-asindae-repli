@@ -9,11 +9,18 @@ const {
   SEND_DELAY_MS = '1500',
   MAX_GROUPS_PER_BATCH = '5',
   BATCH_PAUSE_MS = '12000',
+  RETRY_ATTEMPTS = '2',
+  RETRY_BACKOFF_MS = '2500',
+  JITTER_MS = '500',
+  LIST_GROUPS = '0'
 } = process.env;
 
 const SEND_DELAY = Math.max(0, Number(SEND_DELAY_MS) || 1500);
 const BATCH_SIZE = Math.max(1, Number(MAX_GROUPS_PER_BATCH) || 5);
 const BATCH_PAUSE = Math.max(0, Number(BATCH_PAUSE_MS) || 12000);
+const RETRIES = Math.max(0, Number(RETRY_ATTEMPTS) || 2);
+const RETRY_BACKOFF = Math.max(0, Number(RETRY_BACKOFF_MS) || 2500);
+const JITTER = Math.max(0, Number(JITTER_MS) || 500);
 
 const GROUP_SOURCE = WHATSAPP_GROUP_SOURCE.trim();
 const GROUP_TARGETS = WHATSAPP_GROUP_TARGETS.split(',').map(g => g.trim()).filter(Boolean);
@@ -53,11 +60,17 @@ client.on('qr', qr => {
 client.on('ready', () => {
   if (isReady) return;
   isReady = true;
-  
+
   console.log('✅ Bot listo');
   console.log('🟡 Grupo principal:', GROUP_SOURCE);
   console.log('🔵 Grupos destino:', GROUP_TARGETS.length, 'grupos');
   console.log('👂 Escuchando mensajes...');
+  if (LIST_GROUPS === '1') {
+    client.getChats().then(chats => {
+      const grupos = chats.filter(c => c.isGroup).map(g => g.name);
+      console.log('Grupos disponibles:', grupos);
+    });
+  }
 });
 
 client.on('message', async (msg) => {
@@ -90,16 +103,22 @@ client.on('message', async (msg) => {
         for (let i = 0; i < batches.length; i++) {
           const batch = batches[i];
           for (const destino of batch) {
-            try {
-              await destino.sendMessage(
-                new MessageMedia(media.mimetype, media.data, media.filename),
-                { caption }
-              );
-              console.log(`  ✓ ${destino.name}`);
-            } catch (err) {
-              console.error(`  ✗ ${destino.name}:`, err.message);
+            let ok = false, intentos = 0;
+            while (!ok && intentos <= RETRIES) {
+              try {
+                await destino.sendMessage(
+                  new MessageMedia(media.mimetype, media.data, media.filename),
+                  { caption }
+                );
+                console.log(`  ✓ ${destino.name}`);
+                ok = true;
+              } catch (err) {
+                console.error(`  ✗ ${destino.name}:`, err.message);
+                intentos++;
+                await sleep(RETRY_BACKOFF + Math.floor(Math.random() * JITTER));
+              }
             }
-            await sleep(SEND_DELAY);
+            await sleep(SEND_DELAY + Math.floor(Math.random() * JITTER));
           }
           if (i < batches.length - 1) {
             await sleep(BATCH_PAUSE);
@@ -114,5 +133,3 @@ client.on('message', async (msg) => {
 
 console.log('🔄 Iniciando...');
 client.initialize();
-
-
